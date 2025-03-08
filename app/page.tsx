@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { Menu, MessageSquare, Settings, Users, LogOut, Plus } from "lucide-react"
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -15,211 +15,506 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAuth } from "@/lib/auth-context"
 import { useToast } from "@/components/ui/use-toast"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger, DialogClose } from "@/components/ui/dialog"
+import { channelsApi, messagesApi, usersApi } from "@/lib/api"
+import { useIsMobile } from "@/hooks/use-mobile"
+import io from "socket.io-client"
+
+// Types
+type Channel = {
+  id: string
+  name: string
+  description: string
+  type: "public" | "private"
+  createdBy: {
+    id: string
+    username: string
+    displayName: string
+  }
+  createdAt: string
+}
+
+type User = {
+  id: string
+  username: string
+  displayName: string
+  avatar: string
+  status: "online" | "offline"
+  lastSeen?: string
+}
+
+type Message = {
+  id: string
+  content: string
+  sender: {
+    id: string
+    username: string
+    displayName: string
+    avatar: string
+  }
+  channelId?: string
+  receiver?: {
+    id: string
+    username: string
+    displayName: string
+    avatar: string
+  }
+  readBy: string[]
+  attachments: string[]
+  createdAt: string
+}
 
 export default function Home() {
   const { user, logout } = useAuth()
   const { toast } = useToast()
   const [profileOpen, setProfileOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [currentChat, setCurrentChat] = useState("Genel Sohbet")
   const [message, setMessage] = useState("")
   const [isOnline, setIsOnline] = useState(true)
   const [newChannelName, setNewChannelName] = useState("")
-  const newChannelInputRef = useRef<HTMLInputElement>(null)
+  const newChannelInputRef = useRef<HTMLInputElement | null>(null)
+  const isMobile = useIsMobile()
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // State for unread messages
-  const [unreadCounts, setUnreadCounts] = useState({
-    "Genel Sohbet": 0,
-    Yardım: 2,
-    Ali: 0,
-    Ayşe: 3,
-    Mehmet: 0,
-  })
+  // State for data
+  const [channels, setChannels] = useState<Channel[]>([])
+  const [directUsers, setDirectUsers] = useState<User[]>([])
+  const [conversations, setConversations] = useState<Record<string, Message[]>>({})
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({})
+  const [socket, setSocket] = useState<any>(null)
+  const [currentChatType, setCurrentChatType] = useState<'channel' | 'direct' | null>(null)
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null)
+  const [currentChat, setCurrentChat] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
 
-  const [conversations, setConversations] = useState<{
-    [key: string]: { sender: string; text: string; time: string }[]
-  }>({
-    "Genel Sohbet": [
-      { sender: "Ali", text: "Merhaba herkese!", time: "14:30" },
-      { sender: "Ayşe", text: "Herkese selam!", time: "14:32" },
-      { sender: "Mehmet", text: "Nasılsınız arkadaşlar?", time: "14:33" },
-    ],
-    Yardım: [
-      { sender: "Sistem", text: "Yardım kanalına hoş geldiniz. Sorunuzu yazabilirsiniz.", time: "10:00" },
-      { sender: "Ben", text: "Mesaj gönderme konusunda sorun yaşıyorum.", time: "10:15" },
-      { sender: "Destek", text: "Size nasıl yardımcı olabiliriz?", time: "10:16" },
-    ],
-    Ali: [
-      { sender: "Ali", text: "Merhaba, nasılsın?", time: "14:30" },
-      { sender: "Ben", text: "İyiyim, teşekkürler! Sen nasılsın?", time: "14:32" },
-      { sender: "Ali", text: "Ben de iyiyim, teşekkür ederim.", time: "14:33" },
-    ],
-    Ayşe: [
-      { sender: "Ayşe", text: "Toplantı saat kaçta?", time: "09:30" },
-      { sender: "Ben", text: "Saat 15:00'da", time: "09:31" },
-      { sender: "Ayşe", text: "Teşekkürler, orada olacağım.", time: "09:32" },
-    ],
-    Mehmet: [
-      { sender: "Mehmet", text: "Proje dosyalarını gönderebilir misin?", time: "11:20" },
-      { sender: "Ben", text: "Tabii, hemen gönderiyorum.", time: "11:22" },
-      { sender: "Mehmet", text: "Teşekkür ederim.", time: "11:25" },
-    ],
-  })
-
-  const [userAvatars, setUserAvatars] = useState({
-    Ali: "/placeholder.svg?height=40&width=40&text=A",
-    Ayşe: "/placeholder.svg?height=40&width=40&text=AY",
-    Mehmet: "/placeholder.svg?height=40&width=40&text=M",
-    Sistem: "/placeholder.svg?height=40&width=40&text=S",
-    Destek: "/placeholder.svg?height=40&width=40&text=D",
-    Ben: user?.avatar || "/placeholder.svg?height=40&width=40&text=B",
-  })
-
-  // Kullanıcı girişinde avatar'ı güncelle
+  // Connect to socket
   useEffect(() => {
     if (user) {
-      setUserAvatars(prev => ({
-        ...prev,
-        Ben: user.avatar || `/placeholder.svg?height=40&width=40&text=${user.displayName.charAt(0)}`
-      }))
+      const token = localStorage.getItem("token")
+      const socketInstance = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:5000", {
+        auth: { token }
+      })
+
+      socketInstance.on("connect", () => {
+        console.log("Socket connected")
+      })
+
+      socketInstance.on("connect_error", (error: Error) => {
+        console.error("Socket connection error:", error)
+      })
+
+      // Handle new messages
+      socketInstance.on("message:new", (data: Message) => {
+        handleNewMessage(data)
+      })
+
+      // Handle message deletion
+      socketInstance.on("message:delete", (data: { id: string, channelId?: string, receiverId?: string }) => {
+        handleDeleteMessage(data)
+      })
+
+      // Handle user status updates
+      socketInstance.on("status:update", (data: { userId: string, status: "online" | "offline", lastSeen: string }) => {
+        handleStatusUpdate(data)
+      })
+
+      setSocket(socketInstance)
+
+      return () => {
+        socketInstance.disconnect()
+      }
     }
   }, [user])
 
-  const [channels, setChannels] = useState([
-    { id: "general", name: "Genel Sohbet" },
-    { id: "help", name: "Yardım" },
-  ])
-
-  const directMessages = [
-    { id: "user1", name: "Ali", avatar: "/placeholder.svg?height=40&width=40&text=A", online: true },
-    { id: "user2", name: "Ayşe", avatar: "/placeholder.svg?height=40&width=40&text=AY", online: false },
-    { id: "user3", name: "Mehmet", avatar: "/placeholder.svg?height=40&width=40&text=M", online: true },
-  ]
-
-  const handleSendMessage = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (message.trim()) {
-      setConversations({
-        ...conversations,
-        [currentChat]: [
-          ...conversations[currentChat],
-          {
-            sender: "Ben",
-            text: message,
-            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          },
-        ],
-      })
-      setMessage("")
+  // Load channels and users
+  useEffect(() => {
+    if (user) {
+      loadChannels()
+      loadUsers()
     }
-  }
+  }, [user])
 
-  // Function to handle chat selection and clear unread count
-  const handleChatSelect = (chatName: string) => {
-    setCurrentChat(chatName)
-
-    // Clear unread count for the selected chat
-    if (unreadCounts[chatName] > 0) {
-      setUnreadCounts({
-        ...unreadCounts,
-        [chatName]: 0,
-      })
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    if (currentChat && conversations[currentChat]) {
+      scrollToBottom()
     }
+  }, [currentChat, conversations])
+
+  // Join channel room when current chat changes
+  useEffect(() => {
+    if (socket && currentChatType === 'channel' && currentChatId) {
+      socket.emit('channel:join', currentChatId)
+      
+      // Mark messages as read
+      markMessagesAsRead()
+      
+      return () => {
+        socket.emit('channel:leave', currentChatId)
+      }
+    }
+  }, [socket, currentChatType, currentChatId])
+
+  // Format time helper
+  const formatTime = (dateString: string) => {
+    const date = new Date(dateString)
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   }
 
-  const handleLogout = () => {
-    logout();
-    toast({
-      title: "Çıkış yapıldı",
-      description: "Başarıyla çıkış yaptınız."
-    });
+  // Scroll to bottom helper
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
-  // Yeni kanal oluşturma fonksiyonu
-  const handleCreateChannel = () => {
-    if (!newChannelName.trim()) {
+  // Load channels
+  const loadChannels = async () => {
+    try {
+      setLoading(true)
+      const response = await channelsApi.getChannels()
+      if (response.success) {
+        setChannels(response.channels)
+        
+        // Initialize unread counts for channels
+        const counts = { ...unreadCounts }
+        response.channels.forEach((channel: Channel) => {
+          if (!counts[channel.name]) {
+            counts[channel.name] = 0
+          }
+        })
+        setUnreadCounts(counts)
+      }
+    } catch (error) {
+      console.error("Error loading channels:", error)
       toast({
         variant: "destructive",
-        title: "Hata",
-        description: "Kanal adı boş olamaz."
-      });
-      return;
+        title: "Error",
+        description: "Failed to load channels"
+      })
+    } finally {
+      setLoading(false)
     }
+  }
 
-    // Kanal adının benzersiz olup olmadığını kontrol et
-    if (channels.some(channel => channel.name === newChannelName)) {
+  // Load users
+  const loadUsers = async () => {
+    try {
+      setLoading(true)
+      const response = await usersApi.getAllUsers()
+      if (response.success) {
+        // Filter out current user
+        const otherUsers = response.users.filter((u: User) => u.id !== user?.id)
+        setDirectUsers(otherUsers)
+        
+        // Initialize unread counts for direct messages
+        const counts = { ...unreadCounts }
+        otherUsers.forEach((u: User) => {
+          if (!counts[u.displayName]) {
+            counts[u.displayName] = 0
+          }
+        })
+        setUnreadCounts(counts)
+      }
+    } catch (error) {
+      console.error("Error loading users:", error)
       toast({
         variant: "destructive",
-        title: "Hata",
-        description: "Bu isimde bir kanal zaten var."
-      });
-      return;
+        title: "Error",
+        description: "Failed to load users"
+      })
+    } finally {
+      setLoading(false)
     }
+  }
 
-    // Yeni kanal oluştur
-    const newChannelId = `channel-${Date.now()}`;
-    const newChannel = { id: newChannelId, name: newChannelName };
-    
-    setChannels([...channels, newChannel]);
-    
-    // Yeni kanal için boş bir sohbet oluştur
-    setConversations({
-      ...conversations,
-      [newChannelName]: [
-        { 
-          sender: "Sistem", 
-          text: `"${newChannelName}" kanalına hoş geldiniz! Bu kanal yeni oluşturuldu.`, 
-          time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) 
+  // Load messages for a chat
+  const loadMessages = async (chatId: string, chatType: 'channel' | 'direct') => {
+    try {
+      setLoading(true)
+      let response
+      
+      if (chatType === 'channel') {
+        response = await messagesApi.getMessages({ channelId: chatId })
+      } else {
+        response = await messagesApi.getMessages({ receiverId: chatId })
+      }
+      
+      if (response.success) {
+        // Find the chat name
+        let chatName = ''
+        if (chatType === 'channel') {
+          const channel = channels.find(c => c.id === chatId)
+          chatName = channel?.name || ''
+        } else {
+          const directUser = directUsers.find(u => u.id === chatId)
+          chatName = directUser?.displayName || ''
         }
-      ]
-    });
-
-    // Yeni oluşturulan kanala geçiş yap
-    setCurrentChat(newChannelName);
-    
-    // Formu sıfırla
-    setNewChannelName("");
-    
-    toast({
-      title: "Başarılı",
-      description: `"${newChannelName}" kanalı oluşturuldu.`
-    });
+        
+        // Update conversations
+        setConversations(prev => ({
+          ...prev,
+          [chatName]: response.messages
+        }))
+        
+        // Clear unread count
+        setUnreadCounts(prev => ({
+          ...prev,
+          [chatName]: 0
+        }))
+      }
+    } catch (error) {
+      console.error("Error loading messages:", error)
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to load messages"
+      })
+    } finally {
+      setLoading(false)
+    }
   }
 
-  // Çevrimiçi/çevrimdışı durumunu değiştir
-  const toggleOnlineStatus = () => {
-    setIsOnline(!isOnline);
-    toast({
-      title: isOnline ? "Çevrimdışı durumuna geçildi" : "Çevrimiçi durumuna geçildi",
-      description: isOnline ? "Artık çevrimdışı görünüyorsunuz." : "Artık çevrimiçi görünüyorsunuz."
-    });
+  // Handle chat selection
+  const handleChatSelect = (chatId: string, chatType: 'channel' | 'direct') => {
+    setCurrentChatId(chatId)
+    setCurrentChatType(chatType)
+    
+    // Find chat name
+    let chatName = ''
+    if (chatType === 'channel') {
+      const channel = channels.find(c => c.id === chatId)
+      chatName = channel?.name || ''
+    } else {
+      const directUser = directUsers.find(u => u.id === chatId)
+      chatName = directUser?.displayName || ''
+    }
+    
+    setCurrentChat(chatName)
+    
+    // Load messages
+    loadMessages(chatId, chatType)
+    
+    // Close mobile menu if open
+    if (isMobile) {
+      setMobileMenuOpen(false)
+    }
+  }
+
+  // Handle sending a message
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault()
+    
+    if (!message.trim() || !currentChatId || !currentChatType) return
+    
+    try {
+      const messageData = {
+        content: message,
+        ...(currentChatType === 'channel' 
+          ? { channelId: currentChatId } 
+          : { receiverId: currentChatId })
+      }
+      
+      const response = await messagesApi.sendMessage(messageData)
+      
+      if (response.success) {
+        // Clear input
+        setMessage("")
+        
+        // No need to update conversations here as the socket will handle it
+      }
+    } catch (error) {
+      console.error("Error sending message:", error)
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to send message"
+      })
+    }
+  }
+
+  // Handle new message from socket
+  const handleNewMessage = (message: Message) => {
+    // Find the chat this message belongs to
+    let chatName = ''
+    
+    if (message.channelId) {
+      const channel = channels.find(c => c.id === message.channelId)
+      if (channel) {
+        chatName = channel.name
+      }
+    } else if (message.receiver) {
+      // For direct messages, use the other person's name
+      if (message.sender.id === user?.id) {
+        chatName = message.receiver.displayName
+      } else {
+        chatName = message.sender.displayName
+      }
+    }
+    
+    if (!chatName) return
+    
+    // Update conversations
+    setConversations(prev => {
+      const updatedConversations = { ...prev }
+      if (!updatedConversations[chatName]) {
+        updatedConversations[chatName] = []
+      }
+      updatedConversations[chatName] = [...updatedConversations[chatName], message]
+      return updatedConversations
+    })
+    
+    // Update unread count if not the current chat
+    if (chatName !== currentChat && message.sender.id !== user?.id) {
+      setUnreadCounts(prev => ({
+        ...prev,
+        [chatName]: (prev[chatName] || 0) + 1
+      }))
+    }
+  }
+
+  // Handle message deletion
+  const handleDeleteMessage = (data: { id: string, channelId?: string, receiverId?: string }) => {
+    // Update all conversations to remove the deleted message
+    setConversations(prev => {
+      const updatedConversations = { ...prev }
+      
+      Object.keys(updatedConversations).forEach(chatName => {
+        updatedConversations[chatName] = updatedConversations[chatName].filter(
+          msg => msg.id !== data.id
+        )
+      })
+      
+      return updatedConversations
+    })
+  }
+
+  // Handle user status update
+  const handleStatusUpdate = (data: { userId: string, status: "online" | "offline", lastSeen: string }) => {
+    // Update directUsers with new status
+    setDirectUsers(prev => 
+      prev.map(user => 
+        user.id === data.userId 
+          ? { ...user, status: data.status, lastSeen: data.lastSeen }
+          : user
+      )
+    )
+  }
+
+  // Mark messages as read
+  const markMessagesAsRead = async () => {
+    if (!currentChatId || !currentChatType) return
+    
+    try {
+      if (currentChatType === 'channel') {
+        await messagesApi.markAsRead({ channelId: currentChatId })
+      } else {
+        await messagesApi.markAsRead({ senderId: currentChatId })
+      }
+      
+      // Update unread count
+      if (currentChat) {
+        setUnreadCounts(prev => ({
+          ...prev,
+          [currentChat]: 0
+        }))
+      }
+    } catch (error) {
+      console.error("Error marking messages as read:", error)
+    }
+  }
+
+  // Create a new channel
+  const handleCreateChannel = async () => {
+    if (!newChannelName.trim()) return
+    
+    try {
+      const response = await channelsApi.createChannel({
+        name: newChannelName,
+        description: `${newChannelName} channel`
+      })
+      
+      if (response.success) {
+        toast({
+          title: "Success",
+          description: "Channel created successfully"
+        })
+        
+        // Reload channels
+        loadChannels()
+        
+        // Clear input
+        setNewChannelName("")
+      }
+    } catch (error) {
+      console.error("Error creating channel:", error)
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to create channel"
+      })
+    }
+  }
+
+  // Toggle online status
+  const handleToggleOnlineStatus = async () => {
+    const newStatus = isOnline ? 'offline' : 'online'
+    
+    try {
+      if (user) {
+        await usersApi.updateUser(user.id, { status: newStatus })
+        setIsOnline(!isOnline)
+        
+        // Emit status change to socket
+        if (socket) {
+          socket.emit('status:change', newStatus)
+        }
+      }
+    } catch (error) {
+      console.error("Error updating status:", error)
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to update status"
+      })
+    }
+  }
+
+  // Handle logout
+  const handleLogout = () => {
+    logout()
   }
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex h-screen overflow-hidden">
       {/* Mobile menu button */}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="absolute top-4 left-4 md:hidden z-10"
-        onClick={() => setMobileMenuOpen(true)}
-      >
-        <Menu className="h-6 w-6" />
-      </Button>
+      {isMobile && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="absolute left-4 top-4 z-50 md:hidden"
+          onClick={() => setMobileMenuOpen(true)}
+        >
+          <Menu className="h-6 w-6" />
+        </Button>
+      )}
 
-      {/* Sidebar - Desktop */}
-      <div className="hidden md:flex flex-col w-64 border-r bg-gradient-to-b from-blue-500/5 to-blue-500/10">
+      {/* Sidebar */}
+      <div
+        className={`${
+          isMobile
+            ? "fixed inset-y-0 left-0 z-50 w-64 transform transition-transform duration-200 ease-in-out"
+            : "w-64 border-r"
+        } ${mobileMenuOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}
+      >
         <SidebarContent
           channels={channels}
-          directMessages={directMessages}
-          currentChat={currentChat}
+          directMessages={directUsers}
+          currentChatId={currentChatId}
           unreadCounts={unreadCounts}
-          setCurrentChat={handleChatSelect}
+          handleChatSelect={handleChatSelect}
           setProfileOpen={setProfileOpen}
           user={user}
           onLogout={handleLogout}
           onlineStatus={isOnline}
-          onToggleOnlineStatus={toggleOnlineStatus}
+          onToggleOnlineStatus={handleToggleOnlineStatus}
           onCreateChannel={handleCreateChannel}
           newChannelName={newChannelName}
           setNewChannelName={setNewChannelName}
@@ -227,155 +522,168 @@ export default function Home() {
         />
       </div>
 
-      {/* Sidebar - Mobile */}
-      <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
-        <SheetContent side="left" className="p-0 w-64 bg-gradient-to-b from-blue-500/5 to-blue-500/10">
-          <SidebarContent
-            channels={channels}
-            directMessages={directMessages}
-            currentChat={currentChat}
-            unreadCounts={unreadCounts}
-            setCurrentChat={(chat) => {
-              handleChatSelect(chat)
-              setMobileMenuOpen(false)
-            }}
-            setProfileOpen={setProfileOpen}
-            user={user}
-            onLogout={handleLogout}
-            onlineStatus={isOnline}
-            onToggleOnlineStatus={toggleOnlineStatus}
-            onCreateChannel={handleCreateChannel}
-            newChannelName={newChannelName}
-            setNewChannelName={setNewChannelName}
-            newChannelInputRef={newChannelInputRef}
-          />
-        </SheetContent>
-      </Sheet>
-
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
-        <header className="h-14 border-b flex items-center px-4 sticky top-0 bg-background z-10">
-          <div className="flex items-center">
-            <h2 className="font-semibold text-blue-600">{currentChat}</h2>
-          </div>
-        </header>
-
-        <ScrollArea className="flex-1 p-4">
-          <div className="space-y-4">
-            {conversations[currentChat]?.map((msg, i) => (
-              <div key={i} className={`flex ${msg.sender === "Ben" ? "justify-end" : "justify-start"} mb-4`}>
-                {msg.sender !== "Ben" && (
-                  <Avatar className="h-8 w-8 mr-2 mt-1">
-                    <AvatarImage src={userAvatars[msg.sender] || "/placeholder.svg?height=32&width=32"} />
-                    <AvatarFallback>{msg.sender.charAt(0)}</AvatarFallback>
-                  </Avatar>
-                )}
-                <div
-                  className={`max-w-[80%] px-4 py-2 rounded-lg ${
-                    msg.sender === "Ben" ? "bg-primary text-primary-foreground" : "bg-muted"
-                  }`}
-                >
-                  {msg.sender !== "Ben" && <div className="font-semibold text-sm">{msg.sender}</div>}
-                  <div>{msg.text}</div>
-                  <div className="text-xs opacity-70 text-right mt-1">{msg.time}</div>
+      {/* Main content */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {currentChat ? (
+          <div className="flex h-full flex-col">
+            {/* Chat header */}
+            <div className="border-b p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <h2 className="text-lg font-medium">{currentChat}</h2>
                 </div>
-                {msg.sender === "Ben" && (
-                  <Avatar className="h-8 w-8 ml-2 mt-1">
-                    <AvatarImage src={userAvatars["Ben"]} />
-                    <AvatarFallback>{user?.displayName.charAt(0) || "B"}</AvatarFallback>
-                  </Avatar>
-                )}
               </div>
-            ))}
-          </div>
-        </ScrollArea>
+            </div>
 
-        <footer className="border-t p-4">
-          <form onSubmit={handleSendMessage} className="flex gap-2">
-            <Input
-              placeholder="Mesajınızı yazın..."
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              className="flex-1"
-            />
-            <Button type="submit" className="bg-blue-600 hover:bg-blue-700">Gönder</Button>
-          </form>
-        </footer>
+            {/* Messages */}
+            <ScrollArea className="flex-1 p-4">
+              <div className="space-y-4">
+                {loading ? (
+                  <div className="flex justify-center p-4">
+                    <p>Loading messages...</p>
+                  </div>
+                ) : conversations[currentChat]?.length === 0 ? (
+                  <div className="flex justify-center p-4">
+                    <p>No messages yet. Start the conversation!</p>
+                  </div>
+                ) : (
+                  conversations[currentChat]?.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`flex ${
+                        msg.sender.id === user?.id ? "justify-end" : "justify-start"
+                      }`}
+                    >
+                      <div
+                        className={`flex max-w-[80%] items-start space-x-2 ${
+                          msg.sender.id === user?.id ? "flex-row-reverse space-x-reverse" : "flex-row"
+                        }`}
+                      >
+                        {msg.sender.id !== user?.id && (
+                          <Avatar className="h-8 w-8">
+                            <AvatarImage src={msg.sender.avatar} />
+                            <AvatarFallback>{msg.sender.displayName.charAt(0)}</AvatarFallback>
+                          </Avatar>
+                        )}
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span className="text-sm font-medium">
+                              {msg.sender.id === user?.id ? "Ben" : msg.sender.displayName}
+                            </span>
+                            <span className="text-xs text-muted-foreground">
+                              {formatTime(msg.createdAt)}
+                            </span>
+                          </div>
+                          <div
+                            className={`mt-1 rounded-lg p-3 ${
+                              msg.sender.id === user?.id
+                                ? "bg-primary text-primary-foreground"
+                                : "bg-muted"
+                            }`}
+                          >
+                            {msg.content}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+            </ScrollArea>
+
+            {/* Message input */}
+            <div className="border-t p-4">
+              <form onSubmit={handleSendMessage} className="flex space-x-2">
+                <Input
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  placeholder="Mesajınızı yazın..."
+                  className="flex-1"
+                />
+                <Button type="submit" disabled={!message.trim() || loading}>
+                  Gönder
+                </Button>
+              </form>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center">
+            <div className="text-center">
+              <h2 className="text-xl font-medium">Hoş Geldiniz!</h2>
+              <p className="mt-2 text-muted-foreground">
+                Sohbet etmek için bir kanal veya kişi seçin.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Profile Panel */}
-      {profileOpen && (
-        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="bg-background border rounded-lg shadow-lg w-full max-w-md p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-bold text-blue-600">Profil</h2>
-              <Button variant="ghost" size="icon" onClick={() => setProfileOpen(false)}>
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="h-4 w-4"
-                >
-                  <path d="M18 6 6 18" />
-                  <path d="m6 6 12 12" />
-                </svg>
-              </Button>
-            </div>
-
-            <div className="flex flex-col items-center gap-4 mb-6">
-              <div className="relative">
-                <Avatar className="w-24 h-24">
-                  <AvatarImage src={user?.avatar || "/placeholder.svg?height=96&width=96"} />
-                  <AvatarFallback>{user?.displayName.charAt(0) || "U"}</AvatarFallback>
+      {/* Profile sheet */}
+      {user && (
+        <Sheet open={profileOpen} onOpenChange={setProfileOpen}>
+          <SheetContent>
+            <div className="space-y-6">
+              <div className="flex flex-col items-center space-y-4">
+                <Avatar className="h-20 w-20">
+                  <AvatarImage src={user.avatar} />
+                  <AvatarFallback>{user.displayName.charAt(0)}</AvatarFallback>
                 </Avatar>
-                <span className={`absolute bottom-1 right-1 flex h-4 w-4 rounded-full ring-2 ring-white ${isOnline ? 'bg-green-500' : 'bg-gray-400'}`}></span>
+                <div className="text-center">
+                  <h2 className="text-xl font-bold">{user.displayName}</h2>
+                  <p className="text-sm text-muted-foreground">@{user.username}</p>
+                </div>
               </div>
-              <Button variant="outline" size="sm">
-                Fotoğrafı Değiştir
-              </Button>
-            </div>
-
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">İsim</label>
-                <Input defaultValue={user?.displayName || "Kullanıcı"} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Durum</label>
-                <Tabs defaultValue={isOnline ? "online" : "offline"} onValueChange={(value) => setIsOnline(value === "online")}>
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="online">Çevrimiçi</TabsTrigger>
-                    <TabsTrigger value="offline">Çevrimdışı</TabsTrigger>
-                  </TabsList>
-                </Tabs>
+              <Separator />
+              <div className="space-y-4">
+                <div>
+                  <h3 className="mb-2 text-sm font-medium">Durum</h3>
+                  <div className="flex items-center space-x-2">
+                    <div
+                      className={`h-3 w-3 rounded-full ${isOnline ? "bg-green-500" : "bg-gray-400"}`}
+                    ></div>
+                    <span>{isOnline ? "Çevrimiçi" : "Çevrimdışı"}</span>
+                  </div>
+                </div>
+                <div>
+                  <h3 className="mb-2 text-sm font-medium">Görünürlük</h3>
+                  <Tabs defaultValue="online" className="w-full">
+                    <TabsList className="grid w-full grid-cols-2">
+                      <TabsTrigger value="online" onClick={() => handleToggleOnlineStatus()}>
+                        Çevrimiçi
+                      </TabsTrigger>
+                      <TabsTrigger value="offline" onClick={() => handleToggleOnlineStatus()}>
+                        Çevrimdışı
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                </div>
               </div>
               <div className="mt-6">
-                <Button variant="outline" className="w-full border-blue-500 text-blue-600 hover:bg-blue-50 hover:text-blue-700" onClick={handleLogout}>
+                <Button
+                  variant="outline"
+                  className="w-full border-blue-500 text-blue-600 hover:bg-blue-50 hover:text-blue-700"
+                  onClick={handleLogout}
+                >
                   <LogOut className="mr-2 h-4 w-4" />
                   Çıkış Yap
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
+          </SheetContent>
+        </Sheet>
       )}
     </div>
   )
 }
 
-// SidebarContent bileşeni
+// SidebarContent component
 interface SidebarContentProps {
-  channels: { id: string; name: string }[]
-  directMessages: { id: string; name: string; avatar: string; online: boolean }[]
-  currentChat: string
+  channels: Channel[]
+  directMessages: User[]
+  currentChatId: string | null
   unreadCounts: Record<string, number>
-  setCurrentChat: (chat: string) => void
+  handleChatSelect: (chatId: string, chatType: 'channel' | 'direct') => void
   setProfileOpen: (open: boolean) => void
   user: any
   onLogout: () => void
@@ -384,15 +692,15 @@ interface SidebarContentProps {
   onCreateChannel: () => void
   newChannelName: string
   setNewChannelName: (name: string) => void
-  newChannelInputRef: React.RefObject<HTMLInputElement>
+  newChannelInputRef: React.RefObject<HTMLInputElement | null>
 }
 
 function SidebarContent({
   channels,
   directMessages,
-  currentChat,
+  currentChatId,
   unreadCounts,
-  setCurrentChat,
+  handleChatSelect,
   setProfileOpen,
   user,
   onLogout,
@@ -470,9 +778,9 @@ function SidebarContent({
             {channels.map((channel) => (
               <Button
                 key={channel.id}
-                variant={currentChat === channel.name ? "secondary" : "ghost"}
+                variant={currentChatId === channel.id ? "secondary" : "ghost"}
                 className="w-full justify-start"
-                onClick={() => setCurrentChat(channel.name)}
+                onClick={() => handleChatSelect(channel.id, 'channel')}
               >
                 <MessageSquare className="mr-2 h-4 w-4" />
                 <span className="flex-1 truncate">{channel.name}</span>
@@ -488,31 +796,28 @@ function SidebarContent({
         <div className="mt-6">
           <div className="flex items-center justify-between py-2">
             <h2 className="text-xs font-semibold text-muted-foreground">Direkt Mesajlar</h2>
-            <Button variant="ghost" size="icon" className="h-5 w-5">
-              <Plus className="h-4 w-4" />
-            </Button>
           </div>
           <div className="space-y-1">
             {directMessages.map((dm) => (
               <Button
                 key={dm.id}
-                variant={currentChat === dm.name ? "secondary" : "ghost"}
+                variant={currentChatId === dm.id ? "secondary" : "ghost"}
                 className="w-full justify-start"
-                onClick={() => setCurrentChat(dm.name)}
+                onClick={() => handleChatSelect(dm.id, 'direct')}
               >
                 <div className="relative mr-2">
                   <Avatar className="h-4 w-4">
                     <AvatarImage src={dm.avatar} />
-                    <AvatarFallback>{dm.name.charAt(0)}</AvatarFallback>
+                    <AvatarFallback>{dm.displayName.charAt(0)}</AvatarFallback>
                   </Avatar>
-                  {dm.online && (
+                  {dm.status === 'online' && (
                     <span className="absolute -bottom-0.5 -right-0.5 flex h-2 w-2 rounded-full bg-green-500 ring-1 ring-background"></span>
                   )}
                 </div>
-                <span className="flex-1 truncate">{dm.name}</span>
-                {unreadCounts[dm.name] > 0 && (
+                <span className="flex-1 truncate">{dm.displayName}</span>
+                {unreadCounts[dm.displayName] > 0 && (
                   <span className="ml-auto flex h-5 w-5 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground">
-                    {unreadCounts[dm.name]}
+                    {unreadCounts[dm.displayName]}
                   </span>
                 )}
               </Button>

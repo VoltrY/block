@@ -2,6 +2,8 @@
 
 import React, { createContext, useContext, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
+import { authApi } from "@/lib/api"
+import { useToast } from "@/components/ui/use-toast"
 
 // Kullanıcı tipi tanımı
 type User = {
@@ -10,6 +12,7 @@ type User = {
   email: string
   displayName: string
   avatar: string
+  status: string
 }
 
 // Auth context için tip tanımı
@@ -29,6 +32,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const router = useRouter()
+  const { toast } = useToast()
 
   // Sayfa yüklendiğinde oturum durumunu kontrol et
   useEffect(() => {
@@ -43,13 +47,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Token varsa kullanıcı bilgilerini al
-        // Gerçek uygulamada burada token doğrulaması yapılacak
-        const userData = localStorage.getItem("user")
-        if (userData) {
-          setUser(JSON.parse(userData))
+        try {
+          const response = await authApi.getCurrentUser()
+          if (response.success) {
+            setUser(response.user)
+          }
+        } catch (error) {
+          console.error("Auth check error:", error)
+          // Token geçersizse temizle
+          localStorage.removeItem("token")
+          localStorage.removeItem("user")
         }
-      } catch (error) {
-        console.error("Auth check error:", error)
       } finally {
         setLoading(false)
       }
@@ -62,27 +70,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = async (username: string, password: string) => {
     setLoading(true)
     try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ username, password }),
-      })
-
-      if (!response.ok) {
-        const data = await response.json()
-        throw new Error(data.message || "Giriş yapılamadı")
-      }
-
-      const data = await response.json()
+      const response = await authApi.login(username, password)
       
       // Token ve kullanıcı bilgilerini kaydet
-      localStorage.setItem("token", data.token)
-      localStorage.setItem("user", JSON.stringify(data.user))
+      localStorage.setItem("token", response.token)
+      localStorage.setItem("user", JSON.stringify(response.user))
       
-      setUser(data.user)
+      setUser(response.user)
       router.push("/")
+      return response
     } catch (error: any) {
       console.error("Login error:", error)
       throw error
@@ -92,11 +88,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   // Logout fonksiyonu
-  const logout = () => {
-    localStorage.removeItem("token")
-    localStorage.removeItem("user")
-    setUser(null)
-    router.push("/login")
+  const logout = async () => {
+    try {
+      // Backend'e logout isteği gönder
+      if (user) {
+        await authApi.logout()
+      }
+    } catch (error) {
+      console.error("Logout error:", error)
+    } finally {
+      // Local storage'dan kullanıcı bilgilerini temizle
+      localStorage.removeItem("token")
+      localStorage.removeItem("user")
+      setUser(null)
+      router.push("/login")
+    }
   }
 
   const value = {

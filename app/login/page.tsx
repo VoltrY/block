@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { Eye, EyeOff, Lock, Mail } from "lucide-react"
+import Link from "next/link"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -114,10 +115,16 @@ export default function LoginPage() {
               </div>
             </div>
           </CardContent>
-          <CardFooter>
+          <CardFooter className="flex flex-col space-y-4">
             <Button type="submit" className="w-full bg-blue-600 hover:bg-blue-700" disabled={loading}>
               {loading ? "Giriş yapılıyor..." : "Giriş Yap"}
             </Button>
+            <div className="text-center text-sm">
+              Hesabınız yok mu?{" "}
+              <Link href="/register" className="text-blue-600 hover:underline">
+                Kayıt Ol
+              </Link>
+            </div>
           </CardFooter>
         </form>
       </Card>
