@@ -8,14 +8,7 @@ exports.getAllUsers = async (req, res) => {
   try {
     const users = await User.find().select('-password');
     
-    const formattedUsers = users.map(user => ({
-      id: user._id,
-      username: user.username,
-      displayName: user.displayName,
-      avatar: user.generateAvatar(),
-      status: user.status,
-      lastSeen: user.lastSeen
-    }));
+    const formattedUsers = users.map(user => formatUserResponse(user));
 
     res.json({
       success: true,
@@ -46,14 +39,7 @@ exports.getUserById = async (req, res) => {
 
     res.json({
       success: true,
-      user: {
-        id: user._id,
-        username: user.username,
-        displayName: user.displayName,
-        avatar: user.generateAvatar(),
-        status: user.status,
-        lastSeen: user.lastSeen
-      }
+      user: formatUserResponse(user)
     });
   } catch (error) {
     logger.error('Get user by ID error:', error);
@@ -101,14 +87,7 @@ exports.updateUser = async (req, res) => {
 
     res.json({
       success: true,
-      user: {
-        id: user._id,
-        username: user.username,
-        displayName: user.displayName,
-        avatar: user.generateAvatar(),
-        status: user.status,
-        lastSeen: user.lastSeen
-      }
+      user: formatUserResponse(user)
     });
   } catch (error) {
     logger.error('Update user error:', error);
@@ -117,4 +96,15 @@ exports.updateUser = async (req, res) => {
       message: 'Server error'
     });
   }
-}; 
+};
+
+// Update the user response formatting to include full avatar URL
+const formatUserResponse = (user) => ({
+  id: user._id,
+  username: user.username,
+  displayName: user.displayName,
+  email: user.email,
+  avatar: user.generateAvatar(),
+  status: user.status,
+  lastSeen: user.lastSeen
+}); 

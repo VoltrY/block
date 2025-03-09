@@ -62,8 +62,11 @@ UserSchema.methods.comparePassword = async function(candidatePassword) {
 
 // Method to generate avatar if none exists
 UserSchema.methods.generateAvatar = function() {
-  if (this.avatar && !this.avatar.includes('placeholder.svg')) {
-    return this.avatar;
+  if (this.avatar) {
+    if (this.avatar.startsWith('http')) {
+      return this.avatar;
+    }
+    return `${process.env.BASE_URL}${this.avatar}`;
   }
   
   const initial = this.displayName.charAt(0).toUpperCase();

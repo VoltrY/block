@@ -7,6 +7,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const { initializeSocket } = require('./services/socket');
 const logger = require('./utils/logger');
+const path = require('path');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -30,7 +31,9 @@ mongoose.connect(process.env.MONGODB_URI)
   });
 
 // Middleware
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 app.use(cors({
   origin: process.env.CORS_ORIGIN,
   credentials: true
@@ -51,6 +54,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/channels', channelRoutes);
 app.use('/api/messages', messageRoutes);
+
+// Middleware kısmına ekle
+app.use('/avatars', express.static(path.join(__dirname, 'public/avatars')));
 
 // 404 handler
 app.use((req, res) => {

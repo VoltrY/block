@@ -1,6 +1,8 @@
 // API utility functions for making requests to the backend
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+export const API_BASE = `${API_URL}/api`;
+export const BASE_URL = API_URL; // For image URLs
 
 // Generic fetch function with authentication
 async function fetchWithAuth(url: string, options: RequestInit = {}) {
@@ -15,7 +17,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   };
   
   // Make the request
-  const response = await fetch(`${API_URL}${url}`, {
+  const response = await fetch(`${API_BASE}${url}`, {
     ...options,
     headers
   });
@@ -62,7 +64,16 @@ export const usersApi = {
     fetchWithAuth(`/users/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data)
-    })
+    }),
+  
+  updateAvatar: (id: string, formData: FormData) => 
+    fetch(`${API_BASE}/users/${id}/avatar`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('token')}`
+      },
+      body: formData
+    }).then(res => res.json())
 };
 
 // Channels API calls
@@ -113,6 +124,12 @@ export const messagesApi = {
   markAsRead: (data: { channelId?: string, senderId?: string }) => 
     fetchWithAuth('/messages/read', {
       method: 'POST',
+      body: JSON.stringify(data)
+    }),
+  
+  updateMessage: (id: string, data: { content: string }) =>
+    fetchWithAuth(`/messages/${id}`, {
+      method: 'PATCH',
       body: JSON.stringify(data)
     })
 }; 

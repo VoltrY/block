@@ -24,7 +24,22 @@ const MessageSchema = new mongoose.Schema({
   }],
   attachments: [{
     type: String
-  }]
+  }],
+  isSystemMessage: {
+    type: Boolean,
+    default: false
+  },
+  isEdited: {
+    type: Boolean,
+    default: false
+  },
+  isDeleted: {
+    type: Boolean,
+    default: false
+  },
+  originalContent: {
+    type: String
+  }
 }, {
   timestamps: true
 });

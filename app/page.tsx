@@ -3,7 +3,7 @@
 import type React from "react"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Menu, MessageSquare, Settings, Users, LogOut, Plus } from "lucide-react"
+import { Menu, MessageSquare, Settings, Users, LogOut, Plus, Trash2, MoreVertical, Pencil } from "lucide-react"
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -18,6 +18,13 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { channelsApi, messagesApi, usersApi } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
 import io from "socket.io-client"
+import { ThemeToggle } from "@/components/theme-toggle"
+import { UploadAvatar } from "@/components/upload-avatar"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
 
 // Types
 type Channel = {
@@ -61,10 +68,14 @@ type Message = {
   readBy: string[]
   attachments: string[]
   createdAt: string
+  isSystemMessage: boolean
+  isDeleted: boolean
+  isEdited: boolean
+  originalContent: string
 }
 
 export default function Home() {
-  const { user, logout } = useAuth()
+  const { user, logout, setUser } = useAuth()
   const { toast } = useToast()
   const [profileOpen, setProfileOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -85,6 +96,8 @@ export default function Home() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(null)
   const [currentChat, setCurrentChat] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null)
+  const [editContent, setEditContent] = useState("")
 
   // Connect to socket
   useEffect(() => {
@@ -248,10 +261,16 @@ export default function Home() {
           chatName = directUser?.displayName || ''
         }
         
-        // Update conversations
+        // Update conversations with full message data including avatars
         setConversations(prev => ({
           ...prev,
-          [chatName]: response.messages
+          [chatName]: response.messages.map((msg: Message) => ({
+            ...msg,
+            sender: {
+              ...msg.sender,
+              avatar: msg.sender.avatar || `/placeholder.svg?height=40&width=40&text=${msg.sender.displayName.charAt(0)}`
+            }
+          }))
         }))
         
         // Clear unread count
@@ -312,14 +331,45 @@ export default function Home() {
           : { receiverId: currentChatId })
       }
       
-      const response = await messagesApi.sendMessage(messageData)
-      
-      if (response.success) {
-        // Clear input
-        setMessage("")
-        
-        // No need to update conversations here as the socket will handle it
+      // Önce mesajı UI'da göster (optimistic update)
+      const tempMessage: Message = {
+        id: `temp-${Date.now()}`,
+        content: message,
+        sender: {
+          id: user?.id || '',
+          username: user?.username || '',
+          displayName: user?.displayName || '',
+          avatar: user?.avatar || `/placeholder.svg?height=40&width=40&text=${user?.displayName.charAt(0) || 'U'}`
+        },
+        ...(currentChatType === 'channel' ? { channelId: currentChatId } : {}),
+        readBy: [user?.id || ''],
+        attachments: [],
+        createdAt: new Date().toISOString(),
+        isSystemMessage: false,
+        isDeleted: false,
+        isEdited: false,
+        originalContent: message
       }
+      
+      if (currentChat) {
+        setConversations(prev => {
+          const updatedConversations = { ...prev }
+          if (!updatedConversations[currentChat]) {
+            updatedConversations[currentChat] = []
+          }
+          updatedConversations[currentChat] = [...updatedConversations[currentChat], tempMessage]
+          return updatedConversations
+        })
+        
+        // Scroll to bottom
+        setTimeout(() => scrollToBottom(), 100)
+      }
+      
+      // Clear message input
+      setMessage("")
+      
+      // Send message to server
+      await messagesApi.sendMessage(messageData)
     } catch (error) {
       console.error("Error sending message:", error)
       toast({
@@ -334,56 +384,59 @@ export default function Home() {
   const handleNewMessage = (message: Message) => {
     // Find the chat this message belongs to
     let chatName = ''
+    let chatId = ''
     
     if (message.channelId) {
       const channel = channels.find(c => c.id === message.channelId)
       if (channel) {
         chatName = channel.name
+        chatId = channel.id
       }
     } else if (message.receiver) {
       // For direct messages, use the other person's name
       if (message.sender.id === user?.id) {
         chatName = message.receiver.displayName
+        chatId = message.receiver.id
       } else {
         chatName = message.sender.displayName
+        chatId = message.sender.id
       }
     }
     
     if (!chatName) return
     
-    // Update conversations
+    // Update conversations with the full message including sender's avatar
     setConversations(prev => {
       const updatedConversations = { ...prev }
       if (!updatedConversations[chatName]) {
         updatedConversations[chatName] = []
       }
-      updatedConversations[chatName] = [...updatedConversations[chatName], message]
+      
+      // Make sure we have the sender's avatar
+      const fullMessage = {
+        ...message,
+        sender: {
+          ...message.sender,
+          avatar: message.sender.avatar || `/placeholder.svg?height=40&width=40&text=${message.sender.displayName.charAt(0)}`
+        }
+      }
+      
+      updatedConversations[chatName] = [...updatedConversations[chatName], fullMessage]
       return updatedConversations
     })
     
+    // If this is the current chat, scroll to bottom
+    if (currentChatId === chatId) {
+      setTimeout(() => scrollToBottom(), 100)
+    }
+    
     // Update unread count if not the current chat
-    if (chatName !== currentChat && message.sender.id !== user?.id) {
+    if (chatId !== currentChatId && message.sender.id !== user?.id) {
       setUnreadCounts(prev => ({
         ...prev,
         [chatName]: (prev[chatName] || 0) + 1
       }))
     }
-  }
-
-  // Handle message deletion
-  const handleDeleteMessage = (data: { id: string, channelId?: string, receiverId?: string }) => {
-    // Update all conversations to remove the deleted message
-    setConversations(prev => {
-      const updatedConversations = { ...prev }
-      
-      Object.keys(updatedConversations).forEach(chatName => {
-        updatedConversations[chatName] = updatedConversations[chatName].filter(
-          msg => msg.id !== data.id
-        )
-      })
-      
-      return updatedConversations
-    })
   }
 
   // Handle user status update
@@ -445,7 +498,7 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Error creating channel:", error)
-      toast({
+    toast({
         variant: "destructive",
         title: "Error",
         description: "Failed to create channel"
@@ -469,7 +522,7 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Error updating status:", error)
-      toast({
+    toast({
         variant: "destructive",
         title: "Error",
         description: "Failed to update status"
@@ -482,18 +535,159 @@ export default function Home() {
     logout()
   }
 
+  // Handle channel deletion
+  const handleDeleteChannel = async (channelId: string, channelName: string) => {
+    try {
+      const response = await channelsApi.deleteChannel(channelId);
+      
+      if (response.success) {
+        // Kanalı listeden kaldır
+        setChannels(prev => prev.filter(c => c.id !== channelId));
+        
+        // Eğer silinmiş kanal açıksa ana sayfaya yönlendir
+        if (currentChatId === channelId) {
+          setCurrentChatId(null);
+          setCurrentChatType(null);
+          setCurrentChat(null);
+        }
+        
+        // Konuşmaları ve okunmamış mesaj sayısını temizle
+        setConversations(prev => {
+          const updated = { ...prev };
+          delete updated[channelName];
+          return updated;
+        });
+        
+        setUnreadCounts(prev => {
+          const updated = { ...prev };
+          delete updated[channelName];
+          return updated;
+        });
+
+    toast({
+          title: "Başarılı",
+          description: "Kanal başarıyla silindi"
+        });
+      }
+    } catch (error) {
+      console.error("Error deleting channel:", error);
+      toast({
+        variant: "destructive",
+        title: "Hata",
+        description: "Kanal silinirken bir hata oluştu"
+      });
+    }
+  };
+
+  // Handle message edit
+  const handleEditMessage = (message: Message) => {
+    // Silinmiş, sistem mesajı veya geçici mesajları düzenlemeye izin verme
+    if (message.isDeleted || message.isSystemMessage || message.id.startsWith('temp-')) {
+      toast({
+        variant: "destructive",
+        title: "Hata",
+        description: "Bu mesaj düzenlenemez"
+      });
+      return;
+    }
+
+    setEditingMessage(message);
+    setEditContent(message.content);
+  };
+
+  const handleUpdateMessage = async () => {
+    if (!editingMessage || !editContent.trim()) return;
+
+    // Geçici mesajları düzenlemeye çalışma
+    if (editingMessage.id.startsWith('temp-')) {
+      setEditingMessage(null);
+      setEditContent('');
+      return;
+    }
+
+    try {
+      const response = await messagesApi.updateMessage(editingMessage.id, {
+        content: editContent.trim()
+      });
+
+      if (response.success) {
+        setConversations(prev => {
+          const updated = { ...prev };
+          Object.keys(updated).forEach(chatName => {
+            updated[chatName] = updated[chatName].map(msg =>
+              msg.id === editingMessage.id
+                ? { ...msg, content: editContent.trim(), isEdited: true }
+                : msg
+            );
+          });
+          return updated;
+        });
+
+        setEditingMessage(null);
+        setEditContent('');
+    
+    toast({
+      title: "Başarılı",
+          description: "Mesaj güncellendi"
+        });
+      }
+    } catch (error) {
+      console.error("Error updating message:", error);
+      toast({
+        variant: "destructive",
+        title: "Hata",
+        description: "Mesaj güncellenirken bir hata oluştu"
+      });
+    }
+  };
+
+  const handleDeleteMessage = async (messageId: string) => {
+    // Geçici mesajları silmeye çalışma
+    if (messageId.startsWith('temp-')) return;
+
+    try {
+      const response = await messagesApi.deleteMessage(messageId);
+
+      if (response.success) {
+        setConversations(prev => {
+          const updated = { ...prev };
+          Object.keys(updated).forEach(chatName => {
+            updated[chatName] = updated[chatName].map(msg =>
+              msg.id === messageId
+                ? { ...msg, content: "Bu mesaj silindi", isDeleted: true }
+                : msg
+            );
+          });
+          return updated;
+        });
+
+        toast({
+          title: "Başarılı",
+          description: "Mesaj silindi"
+        });
+      }
+    } catch (error) {
+      console.error("Error deleting message:", error);
+    toast({
+        variant: "destructive",
+        title: "Hata",
+        description: "Mesaj silinirken bir hata oluştu"
+    });
+  }
+  };
+
   return (
     <div className="flex h-screen overflow-hidden">
       {/* Mobile menu button */}
       {isMobile && (
-        <Button
-          variant="ghost"
-          size="icon"
+      <Button
+        variant="ghost"
+        size="icon"
           className="absolute left-4 top-4 z-50 md:hidden"
-          onClick={() => setMobileMenuOpen(true)}
-        >
-          <Menu className="h-6 w-6" />
-        </Button>
+        onClick={() => setMobileMenuOpen(true)}
+      >
+        <Menu className="h-6 w-6" />
+      </Button>
       )}
 
       {/* Sidebar */}
@@ -519,6 +713,7 @@ export default function Home() {
           newChannelName={newChannelName}
           setNewChannelName={setNewChannelName}
           newChannelInputRef={newChannelInputRef}
+          handleDeleteChannel={handleDeleteChannel}
         />
       </div>
 
@@ -529,15 +724,15 @@ export default function Home() {
             {/* Chat header */}
             <div className="border-b p-4">
               <div className="flex items-center justify-between">
-                <div className="flex items-center">
+          <div className="flex items-center">
                   <h2 className="text-lg font-medium">{currentChat}</h2>
                 </div>
               </div>
-            </div>
+          </div>
 
             {/* Messages */}
-            <ScrollArea className="flex-1 p-4">
-              <div className="space-y-4">
+        <ScrollArea className="flex-1 p-4">
+          <div className="space-y-4">
                 {loading ? (
                   <div className="flex justify-center p-4">
                     <p>Loading messages...</p>
@@ -548,65 +743,173 @@ export default function Home() {
                   </div>
                 ) : (
                   conversations[currentChat]?.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className={`flex ${
-                        msg.sender.id === user?.id ? "justify-end" : "justify-start"
-                      }`}
-                    >
-                      <div
-                        className={`flex max-w-[80%] items-start space-x-2 ${
-                          msg.sender.id === user?.id ? "flex-row-reverse space-x-reverse" : "flex-row"
-                        }`}
-                      >
-                        {msg.sender.id !== user?.id && (
-                          <Avatar className="h-8 w-8">
-                            <AvatarImage src={msg.sender.avatar} />
-                            <AvatarFallback>{msg.sender.displayName.charAt(0)}</AvatarFallback>
-                          </Avatar>
-                        )}
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <span className="text-sm font-medium">
-                              {msg.sender.id === user?.id ? "Ben" : msg.sender.displayName}
-                            </span>
-                            <span className="text-xs text-muted-foreground">
-                              {formatTime(msg.createdAt)}
-                            </span>
-                          </div>
-                          <div
-                            className={`mt-1 rounded-lg p-3 ${
-                              msg.sender.id === user?.id
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-muted"
-                            }`}
-                          >
-                            {msg.content}
+                    <div key={msg.id}>
+                      {editingMessage?.id === msg.id ? (
+                        <div className={`flex ${msg.sender.id === user?.id ? "justify-end" : "justify-start"}`}>
+                          <div className="flex flex-col space-y-2 max-w-[80%]">
+                            <Input
+                              value={editContent}
+                              onChange={(e) => setEditContent(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleUpdateMessage();
+                                } else if (e.key === 'Escape') {
+                                  setEditingMessage(null);
+                                  setEditContent('');
+                                }
+                              }}
+                              className="min-w-[200px]"
+                              autoFocus
+                            />
+                            <div className="flex justify-end space-x-2">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setEditingMessage(null);
+                                  setEditContent('');
+                                }}
+                              >
+                                İptal
+                              </Button>
+                              <Button
+                                size="sm"
+                                onClick={handleUpdateMessage}
+                              >
+                                Kaydet
+                              </Button>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </div>
+                      ) : (
+                        <div className="flex flex-col">
+                          <div className={`flex max-w-[80%] items-start space-x-2 ${
+                            msg.sender.id === user?.id ? "flex-row-reverse space-x-reverse ml-auto" : "flex-row"
+                          }`}>
+                            <Avatar className="h-8 w-8 flex-shrink-0">
+                              <AvatarImage 
+                                src={msg.sender.avatar || `/placeholder.svg?height=40&width=40&text=${msg.sender.displayName.charAt(0)}`} 
+                                alt={msg.sender.displayName}
+                              />
+                              <AvatarFallback>{msg.sender.displayName.charAt(0)}</AvatarFallback>
+                  </Avatar>
+                            <div className="flex flex-col">
+                              <div className="flex items-center space-x-2 mb-1">
+                                <span className="text-sm font-medium">
+                                  {msg.sender.id === user?.id ? "Ben" : msg.sender.displayName}
+                                </span>
+                                <span className="text-xs text-muted-foreground">
+                                  {formatTime(msg.createdAt)}
+                                </span>
+                              </div>
+                              <div className="flex items-start gap-2">
+                                <div className={`rounded-lg p-3 relative group ${
+                                  msg.sender.id === user?.id
+                                    ? "bg-primary text-primary-foreground"
+                                    : "bg-muted"
+                                }`}>
+                                  {msg.isDeleted ? (
+                                    <div className="flex items-center justify-between">
+                                      <span className="italic text-muted-foreground">Bu mesaj silindi</span>
+                                      {msg.sender.id === user?.id && (
+                                        <Popover>
+                                          <PopoverTrigger asChild>
+                                            <Button
+                                              variant="ghost"
+                                              size="icon"
+                                              className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity -mr-1"
+                                            >
+                                              <MoreVertical className="h-4 w-4" />
+                                            </Button>
+                                          </PopoverTrigger>
+                                          <PopoverContent className="w-32 p-1" side="top" align="end">
+                                            <Button
+                                              variant="ghost"
+                                              size="sm"
+                                              className="w-full justify-start text-xs text-destructive"
+                                              onClick={() => handleDeleteMessage(msg.id)}
+                                            >
+                                              <Trash2 className="h-4 w-4 mr-2" />
+                                              Sil
+                                            </Button>
+                                          </PopoverContent>
+                                        </Popover>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center justify-between">
+                                      <div>{msg.content}</div>
+                                      {msg.sender.id === user?.id && (
+                                        <Popover>
+                                          <PopoverTrigger asChild>
+                                            <Button
+                                              variant="ghost"
+                                              size="icon"
+                                              className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity -mr-1"
+                                            >
+                                              <MoreVertical className="h-4 w-4" />
+                                            </Button>
+                                          </PopoverTrigger>
+                                          <PopoverContent className="w-32 p-1" side="top" align="end">
+                                            {!msg.isDeleted && (
+                                              <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                className="w-full justify-start text-xs"
+                                                onClick={() => handleEditMessage(msg)}
+                                              >
+                                                <Pencil className="h-4 w-4 mr-2" />
+                                                Düzenle
+                                              </Button>
+                                            )}
+                                            <Button
+                                              variant="ghost"
+                                              size="sm"
+                                              className="w-full justify-start text-xs text-destructive"
+                                              onClick={() => handleDeleteMessage(msg.id)}
+                                            >
+                                              <Trash2 className="h-4 w-4 mr-2" />
+                                              Sil
+                                            </Button>
+                                          </PopoverContent>
+                                        </Popover>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                                {msg.isEdited && !msg.isDeleted && (
+                                  <span className="text-xs text-muted-foreground mt-1">
+                                    düzenlendi
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                </div>
                   ))
                 )}
                 <div ref={messagesEndRef} />
-              </div>
-            </ScrollArea>
+          </div>
+        </ScrollArea>
 
             {/* Message input */}
             <div className="border-t p-4">
               <form onSubmit={handleSendMessage} className="flex space-x-2">
-                <Input
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
+            <Input
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
                   placeholder="Mesajınızı yazın..."
-                  className="flex-1"
-                />
+              className="flex-1"
+            />
                 <Button type="submit" disabled={!message.trim() || loading}>
                   Gönder
                 </Button>
-              </form>
+          </form>
             </div>
-          </div>
+              </div>
         ) : (
           <div className="flex flex-1 items-center justify-center">
             <div className="text-center">
@@ -617,7 +920,7 @@ export default function Home() {
             </div>
           </div>
         )}
-      </div>
+            </div>
 
       {/* Profile sheet */}
       {user && (
@@ -625,10 +928,14 @@ export default function Home() {
           <SheetContent>
             <div className="space-y-6">
               <div className="flex flex-col items-center space-y-4">
-                <Avatar className="h-20 w-20">
-                  <AvatarImage src={user.avatar} />
-                  <AvatarFallback>{user.displayName.charAt(0)}</AvatarFallback>
-                </Avatar>
+                <UploadAvatar
+                  currentAvatar={user.avatar}
+                  displayName={user.displayName}
+                  userId={user.id}
+                  onAvatarUpdate={(newAvatar) => {
+                    setUser(prev => prev ? { ...prev, avatar: newAvatar } : null)
+                  }}
+                />
                 <div className="text-center">
                   <h2 className="text-xl font-bold">{user.displayName}</h2>
                   <p className="text-sm text-muted-foreground">@{user.username}</p>
@@ -646,17 +953,11 @@ export default function Home() {
                   </div>
                 </div>
                 <div>
-                  <h3 className="mb-2 text-sm font-medium">Görünürlük</h3>
-                  <Tabs defaultValue="online" className="w-full">
-                    <TabsList className="grid w-full grid-cols-2">
-                      <TabsTrigger value="online" onClick={() => handleToggleOnlineStatus()}>
-                        Çevrimiçi
-                      </TabsTrigger>
-                      <TabsTrigger value="offline" onClick={() => handleToggleOnlineStatus()}>
-                        Çevrimdışı
-                      </TabsTrigger>
-                    </TabsList>
-                  </Tabs>
+                  <h3 className="mb-2 text-sm font-medium">Tema</h3>
+                  <div className="flex items-center justify-between">
+                    <span>Görünüm</span>
+                    <ThemeToggle />
+                  </div>
                 </div>
               </div>
               <div className="mt-6">
@@ -693,6 +994,7 @@ interface SidebarContentProps {
   newChannelName: string
   setNewChannelName: (name: string) => void
   newChannelInputRef: React.RefObject<HTMLInputElement | null>
+  handleDeleteChannel: (channelId: string, channelName: string) => void
 }
 
 function SidebarContent({
@@ -709,7 +1011,8 @@ function SidebarContent({
   onCreateChannel,
   newChannelName,
   setNewChannelName,
-  newChannelInputRef
+  newChannelInputRef,
+  handleDeleteChannel
 }: SidebarContentProps) {
   return (
     <>
@@ -776,11 +1079,11 @@ function SidebarContent({
           </div>
           <div className="space-y-1">
             {channels.map((channel) => (
+              <div key={channel.id} className="flex items-center space-x-1">
               <Button
-                key={channel.id}
-                variant={currentChatId === channel.id ? "secondary" : "ghost"}
+                  variant={currentChatId === channel.id ? "secondary" : "ghost"}
                 className="w-full justify-start"
-                onClick={() => handleChatSelect(channel.id, 'channel')}
+                  onClick={() => handleChatSelect(channel.id, 'channel')}
               >
                 <MessageSquare className="mr-2 h-4 w-4" />
                 <span className="flex-1 truncate">{channel.name}</span>
@@ -790,6 +1093,21 @@ function SidebarContent({
                   </span>
                 )}
               </Button>
+                {/* Kanal sahibi ise silme butonu göster */}
+                {channel.createdBy.id === user?.id && (
+                  <Button
+                    variant="destructive"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteChannel(channel.id, channel.name);
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
             ))}
           </div>
         </div>
@@ -828,4 +1146,3 @@ function SidebarContent({
     </>
   )
 }
-

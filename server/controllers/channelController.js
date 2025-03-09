@@ -106,35 +106,36 @@ exports.getChannelById = async (req, res) => {
   }
 };
 
-// @desc    Create new channel
+// @desc    Create channel
 // @route   POST /api/channels
 // @access  Private
 exports.createChannel = async (req, res) => {
   try {
     const { name, description, type = 'public' } = req.body;
 
-    // Create new channel
-    const channel = new Channel({
+    // Create channel
+    const channel = await Channel.create({
       name,
       description,
       type,
       createdBy: req.user.id,
-      members: type === 'private' ? [req.user.id] : [],
+      members: [req.user.id],
       admins: [req.user.id]
     });
 
-    await channel.save();
+    // Populate creator info
+    await channel.populate('createdBy', 'username displayName');
 
-    // Create welcome message
-    const welcomeMessage = new Message({
-      content: `Welcome to the "${name}" channel!`,
+    // Create system message about channel creation
+    const systemMessage = await Message.create({
+      content: `Bu kanal ${channel.createdBy.displayName} tarafından oluşturulmuştur.`,
+      channelId: channel._id,
       sender: req.user.id,
-      channelId: channel._id
+      isSystemMessage: true,
+      readBy: [req.user.id]
     });
 
-    await welcomeMessage.save();
-
-    // Emit socket event for new channel
+    // Emit socket events
     const io = getIo();
     if (io) {
       io.emit('channel:new', {
@@ -143,11 +144,26 @@ exports.createChannel = async (req, res) => {
         description: channel.description,
         type: channel.type,
         createdBy: {
-          id: req.user.id,
-          username: req.user.username,
-          displayName: req.user.displayName
+          id: channel.createdBy._id,
+          username: channel.createdBy.username,
+          displayName: channel.createdBy.displayName
         },
         createdAt: channel.createdAt
+      });
+
+      // Emit system message
+      io.emit('message:new', {
+        id: systemMessage._id,
+        content: systemMessage.content,
+        channelId: channel._id,
+        sender: {
+          id: req.user.id,
+          username: channel.createdBy.username,
+          displayName: channel.createdBy.displayName
+        },
+        isSystemMessage: true,
+        readBy: [req.user.id],
+        createdAt: systemMessage.createdAt
       });
     }
 
@@ -158,6 +174,11 @@ exports.createChannel = async (req, res) => {
         name: channel.name,
         description: channel.description,
         type: channel.type,
+        createdBy: {
+          id: channel.createdBy._id,
+          username: channel.createdBy.username,
+          displayName: channel.createdBy.displayName
+        },
         createdAt: channel.createdAt
       }
     });
@@ -165,7 +186,7 @@ exports.createChannel = async (req, res) => {
     logger.error('Create channel error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: 'Sunucu hatası'
     });
   }
 };
@@ -247,15 +268,15 @@ exports.deleteChannel = async (req, res) => {
     if (!channel) {
       return res.status(404).json({
         success: false,
-        message: 'Channel not found'
+        message: 'Kanal bulunamadı'
       });
     }
 
-    // Check if user is admin
-    if (!channel.admins.includes(req.user.id)) {
+    // Check if user is the creator
+    if (channel.createdBy.toString() !== req.user.id) {
       return res.status(403).json({
         success: false,
-        message: 'Not authorized to delete this channel'
+        message: 'Bu kanalı silme yetkiniz yok'
       });
     }
 
@@ -269,19 +290,20 @@ exports.deleteChannel = async (req, res) => {
     const io = getIo();
     if (io) {
       io.emit('channel:delete', {
-        id: req.params.id
+        id: req.params.id,
+        name: channel.name
       });
     }
 
     res.json({
       success: true,
-      message: 'Channel deleted successfully'
+      message: 'Kanal başarıyla silindi'
     });
   } catch (error) {
     logger.error('Delete channel error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: 'Sunucu hatası'
     });
   }
 }; 

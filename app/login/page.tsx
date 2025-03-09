@@ -16,7 +16,7 @@ export default function LoginPage() {
   const router = useRouter()
   const { login, isAuthenticated } = useAuth()
   const { toast } = useToast()
-  const [username, setUsername] = useState("enes")
+  const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
@@ -109,9 +109,6 @@ export default function LoginPage() {
                     <Eye className="h-4 w-4" />
                   )}
                 </button>
-              </div>
-              <div className="text-xs text-muted-foreground text-right">
-                Kullanıcı adı: enes, Şifre: enesdemirezen
               </div>
             </div>
           </CardContent>

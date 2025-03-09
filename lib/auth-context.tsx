@@ -22,6 +22,7 @@ type AuthContextType = {
   login: (username: string, password: string) => Promise<void>
   logout: () => void
   isAuthenticated: boolean
+  setUser: React.Dispatch<React.SetStateAction<User | null>>
 }
 
 // Context oluşturma
@@ -111,6 +112,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     login,
     logout,
     isAuthenticated: !!user,
+    setUser,
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

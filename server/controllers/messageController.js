@@ -71,24 +71,55 @@ exports.getMessages = async (req, res) => {
       query.createdAt = { $lt: new Date(before) };
     }
     
-    // Get messages
+    // Get messages with populated sender info
     const messages = await Message.find(query)
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
-      .populate('sender', 'username displayName avatar')
+      .populate({
+        path: 'sender',
+        select: 'username displayName avatar',
+        transform: doc => ({
+          id: doc._id,
+          username: doc.username,
+          displayName: doc.displayName,
+          avatar: doc.generateAvatar() // Tam avatar URL'sini al
+        })
+      })
       .populate('receiverId', 'username displayName avatar');
-    
+
+    // Format messages
+    const formattedMessages = messages.map(msg => ({
+      id: msg._id,
+      content: msg.content,
+      sender: {
+        id: msg.sender.id,
+        username: msg.sender.username,
+        displayName: msg.sender.displayName,
+        avatar: msg.sender.avatar // Artık tam URL
+      },
+      channelId: msg.channelId,
+      receiver: msg.receiverId ? {
+        id: msg.receiverId._id,
+        username: msg.receiverId.username,
+        displayName: msg.receiverId.displayName,
+        avatar: msg.receiverId.generateAvatar()
+      } : null,
+      readBy: msg.readBy,
+      attachments: msg.attachments,
+      createdAt: msg.createdAt
+    }));
+
     // Mark messages as read if they were sent to the current user
-    const unreadMessages = messages.filter(
+    const unreadMessages = formattedMessages.filter(
       msg => !msg.readBy.includes(req.user.id) && 
-             msg.sender._id.toString() !== req.user.id
+             msg.sender.id !== req.user.id
     );
     
     if (unreadMessages.length > 0) {
       await Promise.all(
         unreadMessages.map(msg => 
           Message.findByIdAndUpdate(
-            msg._id, 
+            msg.id, 
             { $addToSet: { readBy: req.user.id } }
           )
         )
@@ -99,7 +130,7 @@ exports.getMessages = async (req, res) => {
       if (io) {
         unreadMessages.forEach(msg => {
           io.emit('message:read', {
-            messageId: msg._id,
+            messageId: msg.id,
             userId: req.user.id
           });
         });
@@ -108,26 +139,7 @@ exports.getMessages = async (req, res) => {
     
     res.json({
       success: true,
-      messages: messages.map(msg => ({
-        id: msg._id,
-        content: msg.content,
-        sender: {
-          id: msg.sender._id,
-          username: msg.sender.username,
-          displayName: msg.sender.displayName,
-          avatar: msg.sender.avatar
-        },
-        channelId: msg.channelId,
-        receiver: msg.receiverId ? {
-          id: msg.receiverId._id,
-          username: msg.receiverId.username,
-          displayName: msg.receiverId.displayName,
-          avatar: msg.receiverId.avatar
-        } : null,
-        readBy: msg.readBy,
-        attachments: msg.attachments,
-        createdAt: msg.createdAt
-      })).reverse() // Reverse to get oldest first
+      messages: formattedMessages.reverse()
     });
   } catch (error) {
     logger.error('Get messages error:', error);
@@ -143,114 +155,58 @@ exports.getMessages = async (req, res) => {
 // @access  Private
 exports.sendMessage = async (req, res) => {
   try {
-    const { content, channelId, receiverId, attachments } = req.body;
+    const { content, channelId, receiverId } = req.body;
+
+    // Get full sender info
+    const sender = await User.findById(req.user.id);
     
-    // Validate input
-    if (!content && (!attachments || attachments.length === 0)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Message must have content or attachments'
-      });
-    }
-    
-    if (!channelId && !receiverId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Either channelId or receiverId must be provided'
-      });
-    }
-    
-    // Check if channel exists and user has access
-    if (channelId) {
-      const channel = await Channel.findById(channelId);
-      if (!channel) {
-        return res.status(404).json({
-          success: false,
-          message: 'Channel not found'
-        });
-      }
-      
-      // For private channels, check if user is a member or admin
-      if (channel.type === 'private' && 
-          !channel.members.includes(req.user.id) && 
-          !channel.admins.includes(req.user.id)) {
-        return res.status(403).json({
-          success: false,
-          message: 'Not authorized to send messages to this channel'
-        });
-      }
-    }
-    
-    // Check if receiver exists
-    if (receiverId) {
-      const receiver = await User.findById(receiverId);
-      if (!receiver) {
-        return res.status(404).json({
-          success: false,
-          message: 'Receiver not found'
-        });
-      }
-    }
-    
-    // Create message
     const message = new Message({
       content,
       sender: req.user.id,
       channelId,
       receiverId,
-      readBy: [req.user.id], // Sender has read the message
-      attachments: attachments || []
+      readBy: [req.user.id]
     });
-    
+
     await message.save();
-    
-    // Populate sender info
-    await message.populate('sender', 'username displayName avatar');
-    
-    // Emit socket event for new message
+
+    // Populate message with full sender info
+    const populatedMessage = await Message.findById(message._id)
+      .populate({
+        path: 'sender',
+        select: 'username displayName avatar',
+        transform: doc => ({
+          id: doc._id,
+          username: doc.username,
+          displayName: doc.displayName,
+          avatar: doc.generateAvatar() // Tam avatar URL'sini al
+        })
+      });
+
+    // Format message for response and socket
+    const formattedMessage = {
+      id: populatedMessage._id,
+      content: populatedMessage.content,
+      sender: populatedMessage.sender,
+      channelId: populatedMessage.channelId,
+      readBy: populatedMessage.readBy,
+      createdAt: populatedMessage.createdAt
+    };
+
+    // Emit socket event
     const io = getIo();
     if (io) {
-      const eventData = {
-        id: message._id,
-        content: message.content,
-        sender: {
-          id: message.sender._id,
-          username: message.sender.username,
-          displayName: message.sender.displayName,
-          avatar: message.sender.avatar
-        },
-        channelId: message.channelId,
-        receiverId: message.receiverId,
-        readBy: message.readBy,
-        attachments: message.attachments,
-        createdAt: message.createdAt
-      };
-      
       if (channelId) {
-        io.to(`channel:${channelId}`).emit('message:new', eventData);
+        io.to(`channel:${channelId}`).emit('message:new', formattedMessage);
       } else if (receiverId) {
-        io.to(`user:${receiverId}`).emit('message:new', eventData);
-        io.to(`user:${req.user.id}`).emit('message:new', eventData);
+        io.to(`user:${receiverId}`).emit('message:new', formattedMessage);
+        io.to(`user:${req.user.id}`).emit('message:new', formattedMessage);
       }
     }
-    
+
     res.status(201).json({
       success: true,
-      message: {
-        id: message._id,
-        content: message.content,
-        sender: {
-          id: message.sender._id,
-          username: message.sender.username,
-          displayName: message.sender.displayName,
-          avatar: message.sender.avatar
-        },
-        channelId: message.channelId,
-        receiverId: message.receiverId,
-        readBy: message.readBy,
-        attachments: message.attachments,
-        createdAt: message.createdAt
-      }
+      message: formattedMessage
     });
   } catch (error) {
     logger.error('Send message error:', error);
@@ -261,67 +217,108 @@ exports.sendMessage = async (req, res) => {
   }
 };
 
+// @desc    Update message
+// @route   PATCH /api/messages/:id
+// @access  Private
+exports.updateMessage = async (req, res) => {
+  try {
+    const { content } = req.body;
+    const message = await Message.findById(req.params.id);
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        message: 'Mesaj bulunamadı'
+      });
+    }
+
+    // Sadece mesajı gönderen kişi düzenleyebilir
+    if (message.sender.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Bu mesajı düzenleme yetkiniz yok'
+      });
+    }
+
+    // İlk düzenleme ise orijinal içeriği kaydet
+    if (!message.isEdited) {
+      message.originalContent = message.content;
+    }
+
+    message.content = content;
+    message.isEdited = true;
+    await message.save();
+
+    const updatedMessage = await Message.findById(message._id)
+      .populate('sender', 'username displayName avatar');
+
+    // Socket.io ile güncellemeyi bildir
+    const io = getIo();
+    if (io) {
+      io.emit('message:update', {
+        id: updatedMessage._id,
+        content: updatedMessage.content,
+        isEdited: true
+      });
+    }
+
+    res.json({
+      success: true,
+      message: updatedMessage
+    });
+  } catch (error) {
+    logger.error('Update message error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Sunucu hatası'
+    });
+  }
+};
+
 // @desc    Delete message
 // @route   DELETE /api/messages/:id
 // @access  Private
 exports.deleteMessage = async (req, res) => {
   try {
     const message = await Message.findById(req.params.id);
-    
+
     if (!message) {
       return res.status(404).json({
         success: false,
-        message: 'Message not found'
+        message: 'Mesaj bulunamadı'
       });
     }
-    
-    // Check if user is the sender of the message
+
+    // Sadece mesajı gönderen kişi silebilir
     if (message.sender.toString() !== req.user.id) {
-      // Check if user is channel admin (for channel messages)
-      if (message.channelId) {
-        const channel = await Channel.findById(message.channelId);
-        if (!channel || !channel.admins.includes(req.user.id)) {
-          return res.status(403).json({
-            success: false,
-            message: 'Not authorized to delete this message'
-          });
-        }
-      } else {
-        return res.status(403).json({
-          success: false,
-          message: 'Not authorized to delete this message'
-        });
-      }
+      return res.status(403).json({
+        success: false,
+        message: 'Bu mesajı silme yetkiniz yok'
+      });
     }
-    
-    await Message.findByIdAndDelete(req.params.id);
-    
-    // Emit socket event for deleted message
+
+    message.content = 'Bu mesaj silindi';
+    message.isDeleted = true;
+    await message.save();
+
+    // Socket.io ile silme işlemini bildir
     const io = getIo();
     if (io) {
-      const eventData = {
-        id: req.params.id,
-        channelId: message.channelId,
-        receiverId: message.receiverId
-      };
-      
-      if (message.channelId) {
-        io.to(`channel:${message.channelId}`).emit('message:delete', eventData);
-      } else if (message.receiverId) {
-        io.to(`user:${message.receiverId}`).emit('message:delete', eventData);
-        io.to(`user:${message.sender}`).emit('message:delete', eventData);
-      }
+      io.emit('message:delete', {
+        id: message._id,
+        isDeleted: true
+      });
     }
-    
+
     res.json({
       success: true,
-      message: 'Message deleted successfully'
+      message: 'Mesaj başarıyla silindi'
     });
   } catch (error) {
     logger.error('Delete message error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: 'Sunucu hatası'
     });
   }
 };
