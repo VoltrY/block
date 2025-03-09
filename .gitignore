@@ -37,3 +37,6 @@ next-env.d.ts
 
 #avatars
 /server/public/avatars
+
+#logs
+/server/logs/
